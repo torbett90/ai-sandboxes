@@ -6,7 +6,7 @@ GHCR_OWNER="torbett90"
 IMAGE_NAME="ghcr.io/${GHCR_OWNER}/ai-sandbox-opencode:latest"
 BASE_IMAGE_NAME="ghcr.io/${GHCR_OWNER}/ai-sandbox-base:latest"
 VOLUME_NAME="oc-sandbox-home"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 # 1. Initialize ~/.oc-sandbox on first run
@@ -41,10 +41,6 @@ PASS_ENV_VARS=(
     "GEMINI_API_KEY"
     "GITHUB_TOKEN"
 )
-
-# Resource limits
-MEMORY_LIMIT="4g"
-CPU_LIMIT="2"
 CONFIG_EOF
 
     cat << 'JSON_EOF' > "${OC_SANDBOX_DIR}/opencode.json"
@@ -126,16 +122,15 @@ else
 fi
 
 # 8. Launch hardened container
+# Note: /tmp uses 'exec' so Bun/OpenTUI can dlopen its native rendering .so library
 exec podman run --rm -it \
     --name "oc-sandbox-$(basename "${CURRENT_DIR}")-$$" \
     --userns=keep-id \
     --security-opt=no-new-privileges \
     --cap-drop=ALL \
     --read-only \
-    --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+    --tmpfs /tmp:rw,exec,nosuid,size=512m \
     --tmpfs /run:rw,noexec,nosuid,size=64m \
-    --memory="${MEMORY_LIMIT:-4g}" \
-    --cpus="${CPU_LIMIT:-2}" \
     -v "${VOLUME_NAME}:/home/sandbox:rw" \
     -v "${HOME}:/host_home:ro" \
     -v "${OC_SANDBOX_DIR}:/host_home/.oc-sandbox:rw" \
