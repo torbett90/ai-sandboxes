@@ -16,7 +16,7 @@ if [ -f "${SANDBOX_CTRL_DIR}/config" ]; then
         dest="${SANDBOX_HOME}/${item}"
         if [ -e "${src}" ]; then
             mkdir -p "$(dirname "${dest}")"
-            rm -rf "${dest}"
+            rm -rf "${dest:?}"
             ln -s "${src}" "${dest}"
         fi
     done

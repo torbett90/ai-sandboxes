@@ -18,7 +18,7 @@ done
 # 2. Symlink OpenCode subdirectories (skills, agents, commands, hooks, plugins)
 for subdir in skills agents commands hooks plugins; do
     if [ -d "${OC_SANDBOX_DIR}/${subdir}" ]; then
-        rm -rf "${OC_CONFIG_DIR}/${subdir}"
+        rm -rf "${OC_CONFIG_DIR:?}/${subdir:?}"
         ln -s "${OC_SANDBOX_DIR}/${subdir}" "${OC_CONFIG_DIR}/${subdir}"
     fi
 done
