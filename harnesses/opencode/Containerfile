@@ -3,8 +3,8 @@ FROM ${BASE_IMAGE}
 
 USER root
 
-# Install OpenCode CLI globally
-RUN npm install -g opencode-ai && npm cache clean --force
+# Install OpenCode v2 CLI globally
+RUN npm install -g @opencode/cli@latest && npm cache clean --force
 
 COPY harness-entrypoint.sh /usr/local/bin/harness-entrypoint.sh
 RUN chmod +x /usr/local/bin/harness-entrypoint.sh
