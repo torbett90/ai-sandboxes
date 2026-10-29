@@ -115,10 +115,10 @@ done
 if [ "$1" == "--shell" ]; then
     shift
     CMD_ARGS=("/bin/bash" "$@")
-elif [ $# -eq 0 ]; then
-    CMD_ARGS=("opencode")
+elif [ "$1" == "opencode" ]; then
+    CMD_ARGS=("opencode" "$@")
 else
-    CMD_ARGS=("$@")
+    CMD_ARGS=("opencode" "$@")
 fi
 
 # 8. Launch hardened container
