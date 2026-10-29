@@ -6,7 +6,8 @@ SANDBOX_HOME="/home/sandbox"
 OC_SANDBOX_DIR="${HOST_HOME}/.oc-sandbox"
 OC_CONFIG_DIR="${SANDBOX_HOME}/.config/opencode"
 
-mkdir -p "${OC_CONFIG_DIR}"
+# Ensure both config and local state/log directories exist and are writable
+mkdir -p "${OC_CONFIG_DIR}" "${SANDBOX_HOME}/.local/share/opencode/log"
 
 # 1. Copy global opencode.json and cli.json from ~/.oc-sandbox into ~/.config/opencode
 for cfg in opencode.json opencode.jsonc cli.json AGENTS.md; do

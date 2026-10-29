@@ -3,8 +3,11 @@ FROM ${BASE_IMAGE}
 
 USER root
 
-# Install OpenCode v2 CLI globally
-RUN npm install -g @opencode/cli@latest && npm cache clean --force
+# Install OpenCode v2 CLI globally (pass --unsafe-perm so postinstall binary selection succeeds cleanly)
+RUN npm install -g --unsafe-perm @opencode/cli@latest && \
+    npm cache clean --force && \
+    mkdir -p /home/sandbox/.local/share/opencode/log /home/sandbox/.config/opencode && \
+    chown -R sandbox:sandbox /home/sandbox
 
 COPY harness-entrypoint.sh /usr/local/bin/harness-entrypoint.sh
 RUN chmod +x /usr/local/bin/harness-entrypoint.sh
