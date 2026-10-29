@@ -1,0 +1,5 @@
+{
+  "name": "opencode",
+  "description": "Sandboxed OpenCode AI coding harness on UBI9",
+  "smoke_test_cmd": "opencode --version"
+}

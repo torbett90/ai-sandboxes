@@ -1,0 +1,210 @@
+name: OCI Image Factory CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  # Weekly rebuild every Monday at 06:00 UTC to pick up latest AI CLI releases & UBI9 security patches
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # =========================================================================
+  # STAGE 1: Lint & Dynamically Discover Harnesses
+  # =========================================================================
+  discover-and-lint:
+    name: Lint & Discover Harnesses
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck on all scripts
+        run: |
+          shellcheck -x bin/* base/*.sh harnesses/*/*.sh
+
+      - name: Discover Harnesses for Matrix Build
+        id: set-matrix
+        run: |
+          HARNESSES=$(jq -c -s '.' harnesses/*/metadata.json)
+          echo "Discovered harnesses: ${HARNESSES}"
+          echo "matrix=${HARNESSES}" >> $GITHUB_OUTPUT
+
+  # =========================================================================
+  # STAGE 2: Build & Push Shared UBI9 Base Image
+  # =========================================================================
+  build-base:
+    name: Build UBI9 Base Sandbox Image
+    needs: discover-and-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase Owner Name
+        id: owner
+        run: |
+          echo "lc_owner=$(echo '${{ env.OWNER }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata for Base Image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc_owner }}/ai-sandbox-base
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+
+      - name: Build and Push UBI9 Base Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./base
+          file: ./base/Containerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=base-ubi9
+          cache-to: type=gha,mode=max,scope=base-ubi9
+
+  # =========================================================================
+  # STAGE 3: Matrix Build, Smoke Test, Scan & Push Harness Images
+  # =========================================================================
+  build-harnesses:
+    name: Build Harness (${{ matrix.harness.name }})
+    needs: [discover-and-lint, build-base]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJson(needs.discover-and-lint.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase Owner Name
+        id: owner
+        run: |
+          echo "lc_owner=$(echo '${{ env.OWNER }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Build Base Locally on PRs (since PRs don't push to GHCR)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./base
+          file: ./base/Containerfile
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc_owner }}/ai-sandbox-base:latest
+          cache-from: type=gha,scope=base-ubi9
+
+      - name: Extract metadata for ${{ matrix.harness.name }}
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc_owner }}/ai-sandbox-${{ matrix.harness.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value={{date 'YYYYMMDD'}},enable={{is_default_branch}}
+            type=sha,prefix=sha-
+
+      - name: Build Harness Image (Load for Testing)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./harnesses/${{ matrix.harness.name }}
+          file: ./harnesses/${{ matrix.harness.name }}/Containerfile
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ steps.owner.outputs.lc_owner }}/ai-sandbox-base:latest
+          load: true
+          tags: local-test/${{ matrix.harness.name }}:test
+          cache-from: type=gha,scope=${{ matrix.harness.name }}-ubi9
+          cache-to: type=gha,mode=max,scope=${{ matrix.harness.name }}-ubi9
+
+      - name: Run Sandbox Smoke & Security Boundary Tests
+        run: |
+          echo "🧪 1. Testing Harness CLI & UBI9 tools: ${{ matrix.harness.smoke_test_cmd }}"
+          docker run --rm local-test/${{ matrix.harness.name }}:test ${{ matrix.harness.smoke_test_cmd }}
+          docker run --rm local-test/${{ matrix.harness.name }}:test rg --version
+          docker run --rm local-test/${{ matrix.harness.name }}:test fd --version
+
+          echo "🔒 2. Testing Read-Only RootFS and Dotfile Symlinking..."
+          mkdir -p /tmp/mock_host_home/.oc-sandbox/skills
+          echo "test-gitconfig" > /tmp/mock_host_home/.gitconfig
+          echo 'SYMLINK_FILES=(".gitconfig")' > /tmp/mock_host_home/.oc-sandbox/config
+          echo '{"test": true}' > /tmp/mock_host_home/.oc-sandbox/opencode.json
+
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:rw \
+            -v /tmp/mock_host_home:/host_home:ro \
+            -v /tmp/mock_host_home/.oc-sandbox:/host_home/.oc-sandbox:rw \
+            local-test/${{ matrix.harness.name }}:test \
+            /bin/bash -c '
+              # Verify symlink was created from config
+              [ -L /home/sandbox/.gitconfig ] || (echo "Failed to symlink .gitconfig" && exit 1)
+              # Verify opencode.json was copied into ~/.config/opencode
+              [ -f /home/sandbox/.config/opencode/opencode.json ] || (echo "Failed to copy opencode.json" && exit 1)
+              # Verify host_home is strictly read-only
+              if touch /host_home/should_fail 2>/dev/null; then
+                echo "SECURITY FAILURE: /host_home is writable!"
+                exit 1
+              fi
+              echo "✅ Sandbox security & symlink tests passed!"
+            '
+
+      - name: Run Trivy Vulnerability Scanner (High/Critical)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: local-test/${{ matrix.harness.name }}:test
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Verified Harness Image to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./harnesses/${{ matrix.harness.name }}
+          file: ./harnesses/${{ matrix.harness.name }}/Containerfile
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ steps.owner.outputs.lc_owner }}/ai-sandbox-base:latest
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.harness.name }}-ubi9

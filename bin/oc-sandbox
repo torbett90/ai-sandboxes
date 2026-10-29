@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -e
+
+OC_SANDBOX_DIR="${HOME}/.oc-sandbox"
+GHCR_OWNER="torbett90"
+IMAGE_NAME="ghcr.io/${GHCR_OWNER}/ai-sandbox-opencode:latest"
+BASE_IMAGE_NAME="ghcr.io/${GHCR_OWNER}/ai-sandbox-base:latest"
+VOLUME_NAME="oc-sandbox-home"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+
+# 1. Initialize ~/.oc-sandbox on first run
+if [ ! -d "${OC_SANDBOX_DIR}" ]; then
+    echo "🚀 First run detected! Initializing ${OC_SANDBOX_DIR}..."
+    mkdir -p "${OC_SANDBOX_DIR}"/{skills,agents,commands,hooks,plugins}
+
+    cat << 'CONFIG_EOF' > "${OC_SANDBOX_DIR}/config"
+# ==========================================================
+# OpenCode Sandbox Configuration
+# ==========================================================
+
+# Port to expose from the container to localhost (set to "" to disable)
+SANDBOX_PORT="4096"
+
+# Override image if testing a specific tag or local build
+# SANDBOX_IMAGE="ghcr.io/torbett90/ai-sandbox-opencode:latest"
+
+# Files/directories in your host $HOME to SYMLINK into the sandbox $HOME (Read-Only).
+SYMLINK_FILES=(
+    ".gitconfig"
+    ".ssh/known_hosts"
+)
+
+# Files/directories in your host $HOME to COPY into the sandbox $HOME on startup.
+SYNC_FILES=()
+
+# Environment variables to pass from your host terminal into the sandbox
+PASS_ENV_VARS=(
+    "ANTHROPIC_API_KEY"
+    "OPENAI_API_KEY"
+    "GEMINI_API_KEY"
+    "GITHUB_TOKEN"
+)
+
+# Resource limits
+MEMORY_LIMIT="4g"
+CPU_LIMIT="2"
+CONFIG_EOF
+
+    cat << 'JSON_EOF' > "${OC_SANDBOX_DIR}/opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "skill": {
+      "*": "allow"
+    }
+  }
+}
+JSON_EOF
+
+    echo "{}" > "${OC_SANDBOX_DIR}/cli.json"
+    echo "✅ Initialized ${OC_SANDBOX_DIR}."
+fi
+
+# 2. Load configuration
+# shellcheck disable=SC1091
+source "${OC_SANDBOX_DIR}/config"
+IMAGE_NAME="${SANDBOX_IMAGE:-$IMAGE_NAME}"
+
+# 3. Helper flags: --build-local or --pull
+if [ "$1" == "--build-local" ]; then
+    echo "🔨 Building UBI9 Base Image locally..."
+    podman build -t "${BASE_IMAGE_NAME}" "${REPO_ROOT}/base"
+    echo "🔨 Building OpenCode Harness Image locally..."
+    podman build --build-arg BASE_IMAGE="${BASE_IMAGE_NAME}" -t "${IMAGE_NAME}" "${REPO_ROOT}/harnesses/opencode"
+    exit 0
+elif [ "$1" == "--pull" ]; then
+    echo "⬇️ Pulling latest image from GHCR (${IMAGE_NAME})..."
+    podman pull "${IMAGE_NAME}"
+    exit 0
+fi
+
+# 4. Ensure image exists locally (pull from GHCR first; fallback to local build if not pushed yet)
+if ! podman image exists "${IMAGE_NAME}"; then
+    echo "📦 Image not found locally. Attempting to pull ${IMAGE_NAME} from GHCR..."
+    if ! podman pull "${IMAGE_NAME}"; then
+        echo "⚠️ Pull failed (image may not be published yet or is private). Building locally instead..."
+        podman build -t "${BASE_IMAGE_NAME}" "${REPO_ROOT}/base"
+        podman build --build-arg BASE_IMAGE="${BASE_IMAGE_NAME}" -t "${IMAGE_NAME}" "${REPO_ROOT}/harnesses/opencode"
+    fi
+fi
+
+# 5. Ensure persistent Podman volume exists
+if ! podman volume exists "${VOLUME_NAME}"; then
+    podman volume create "${VOLUME_NAME}" >/dev/null
+fi
+
+# 6. Safety check: Never run directly in $HOME
+CURRENT_DIR="$(pwd)"
+if [ "${CURRENT_DIR}" == "${HOME}" ]; then
+    echo "❌ Error: Refusing to run oc-sandbox directly in your HOME directory."
+    echo "Please 'cd' into a project repository first."
+    exit 1
+fi
+
+# 7. Assemble dynamic Podman arguments
+PODMAN_ARGS=()
+
+if [ -n "${SANDBOX_PORT}" ]; then
+    PODMAN_ARGS+=("-p" "127.0.0.1:${SANDBOX_PORT}:${SANDBOX_PORT}")
+fi
+
+for var in "${PASS_ENV_VARS[@]}"; do
+    if [ -n "${!var}" ]; then
+        PODMAN_ARGS+=("-e" "${var}=${!var}")
+    fi
+done
+
+if [ "$1" == "--shell" ]; then
+    shift
+    CMD_ARGS=("/bin/bash" "$@")
+elif [ $# -eq 0 ]; then
+    CMD_ARGS=("opencode")
+else
+    CMD_ARGS=("$@")
+fi
+
+# 8. Launch hardened container
+exec podman run --rm -it \
+    --name "oc-sandbox-$(basename "${CURRENT_DIR}")-$$" \
+    --userns=keep-id \
+    --security-opt=no-new-privileges \
+    --cap-drop=ALL \
+    --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+    --tmpfs /run:rw,noexec,nosuid,size=64m \
+    --memory="${MEMORY_LIMIT:-4g}" \
+    --cpus="${CPU_LIMIT:-2}" \
+    -v "${VOLUME_NAME}:/home/sandbox:rw" \
+    -v "${HOME}:/host_home:ro" \
+    -v "${OC_SANDBOX_DIR}:/host_home/.oc-sandbox:rw" \
+    -v "${CURRENT_DIR}:/workspace:rw" \
+    -w /workspace \
+    "${PODMAN_ARGS[@]}" \
+    "${IMAGE_NAME}" \
+    "${CMD_ARGS[@]}"

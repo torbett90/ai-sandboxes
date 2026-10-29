@@ -1,0 +1,50 @@
+FROM registry.access.redhat.com/ubi9/ubi:latest
+
+# Enable Node.js 20 module and install core developer utilities via dnf
+# Note: ubi9 includes curl-minimal by default, which provides the 'curl' command
+RUN dnf module enable -y nodejs:20 && \
+    dnf update -y && \
+    dnf install -y --setopt=tsflags=nodocs \
+        ca-certificates \
+        git \
+        jq \
+        tar \
+        gzip \
+        unzip \
+        findutils \
+        procps-ng \
+        which \
+         shadow-utils \
+        python3 \
+        python3-pip \
+        nodejs \
+        npm \
+    && dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Install ripgrep (rg) and fd-find (fd) static binaries for fast AI code search
+RUN ARCH="$(uname -m)" && \
+    if [ "${ARCH}" = "x86_64" ]; then \
+        RG_ARCH="x86_64-unknown-linux-musl"; \
+        FD_ARCH="x86_64-unknown-linux-musl"; \
+    elif [ "${ARCH}" = "aarch64" ]; then \
+        RG_ARCH="aarch64-unknown-linux-gnu"; \
+        FD_ARCH="aarch64-unknown-linux-gnu"; \
+    fi && \
+    curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${RG_ARCH}.tar.gz" | tar -xz --strip-components=1 -C /usr/local/bin/ "ripgrep-14.1.1-${RG_ARCH}/rg" && \
+    curl -fsSL "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-${FD_ARCH}.tar.gz" | tar -xz --strip-components=1 -C /usr/local/bin/ "fd-v10.2.0-${FD_ARCH}/fd" && \
+    chmod +x /usr/local/bin/rg /usr/local/bin/fd
+
+# Create the unprivileged sandbox user (UID/GID 1000 matches Crostini & standard Linux)
+RUN groupadd -g 1000 sandbox && \
+    useradd -m -u 1000 -g 1000 -s /bin/bash sandbox
+
+COPY sandbox-init.sh /usr/local/bin/sandbox-init.sh
+RUN chmod +x /usr/local/bin/sandbox-init.sh
+
+USER sandbox
+ENV HOME=/home/sandbox
+ENV PATH="/home/sandbox/.local/bin:${PATH}"
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/sandbox-init.sh"]
